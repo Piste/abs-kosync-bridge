@@ -60,6 +60,19 @@ if not hasattr(root_logger, '_configured') or not root_logger._configured:
 logger = logging.getLogger(__name__)
 
 
+def _short_log_snippet(text: str | None, limit: int = 120) -> str:
+    if not text:
+        return ""
+    return sanitize_log_data(" ".join(str(text).split())[:limit])
+
+
+def _format_pct_for_log(value) -> str:
+    try:
+        return f"{float(value):.4%}"
+    except (TypeError, ValueError):
+        return "n/a"
+
+
 class SyncManager:
     def __init__(self,
                  abs_client=None,
@@ -350,6 +363,34 @@ class SyncManager:
             f"fallback={','.join(fallback) if fallback else 'none'}"
         )
         return safe_locator
+
+    def _summarize_locator_roundtrip(self, target_epub: str, target_offset: int, locator: LocatorResult) -> dict:
+        """Return offsets/errors for locator fields without changing the locator."""
+        summary = {
+            "ko_xpath": getattr(locator, "perfect_ko_xpath", None) or getattr(locator, "xpath", None),
+            "cfi": getattr(locator, "cfi", None),
+            "pct": getattr(locator, "percentage", None),
+            "ko_offset": None,
+            "ko_error": None,
+            "cfi_offset": None,
+            "cfi_error": None,
+        }
+        try:
+            if summary["ko_xpath"]:
+                summary["ko_offset"] = self.ebook_parser.resolve_xpath_to_index(target_epub, summary["ko_xpath"])
+                if summary["ko_offset"] is not None:
+                    summary["ko_error"] = abs(int(summary["ko_offset"]) - int(target_offset))
+        except Exception as e:
+            summary["ko_error"] = f"error:{type(e).__name__}"
+
+        try:
+            if summary["cfi"]:
+                summary["cfi_offset"] = self.ebook_parser.resolve_cfi_to_index(target_epub, summary["cfi"])
+                if summary["cfi_offset"] is not None:
+                    summary["cfi_error"] = abs(int(summary["cfi_offset"]) - int(target_offset))
+        except Exception as e:
+            summary["cfi_error"] = f"error:{type(e).__name__}"
+        return summary
 
 
     def _setup_sync_clients(self, clients: dict[str, SyncClient]):
@@ -891,6 +932,25 @@ class SyncManager:
                 start = max(0, int(char_offset) - 400)
                 end = min(len(full_text), int(char_offset) + 400)
                 context_txt = full_text[start:end]
+
+            locator_summary = self._summarize_locator_roundtrip(target_epub, int(char_offset), locator)
+            duration = getattr(book, "duration", None)
+            audio_pct = None
+            if duration:
+                audio_pct = max(0.0, min(float(abs_timestamp) / float(duration), 1.0))
+            logger.info(
+                f"🧭 '{book.abs_id}' ABS time->EPUB locator: "
+                f"ts={float(abs_timestamp):.2f}s "
+                f"audio_pct={_format_pct_for_log(audio_pct)} "
+                f"char_offset={int(char_offset)} "
+                f"locator_pct={_format_pct_for_log(locator_summary['pct'])} "
+                f"ko_xpath='{sanitize_log_data(locator_summary['ko_xpath'])}' "
+                f"ko_offset={locator_summary['ko_offset']} "
+                f"ko_error={locator_summary['ko_error']} "
+                f"cfi_offset={locator_summary['cfi_offset']} "
+                f"cfi_error={locator_summary['cfi_error']} "
+                f"snippet='{_short_log_snippet(context_txt)}'"
+            )
 
             logger.debug(
                 f"'{book.abs_id}' time->ebook mapping ts={float(abs_timestamp):.2f}s offset0={int(char_offset)} "
