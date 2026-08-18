@@ -66,6 +66,53 @@ def test_resolve_xpath_to_index_exact_unique_match(caplog):
     assert any("tier=exact_unique" in record.message for record in caplog.records)
 
 
+def test_resolve_xpath_to_index_textless_anchor_uses_following_text_boundary(caplog):
+    caplog.set_level(logging.INFO)
+    html_content = (
+        "<html><body>"
+        "<p>Prior section.</p>"
+        "<a id='chapter-start'></a>"
+        "<div><p>Chapter starts here.</p></div>"
+        "</body></html>"
+    )
+    parser = _parser_for_single_spine(html_content, start=40)
+
+    index = parser.resolve_xpath_to_index(
+        "book.epub", "/body/DocFragment[1]/body/a"
+    )
+
+    assert index == 40 + len("Prior section. ")
+    assert any("textless XPath target" in record.message for record in caplog.records)
+
+
+def test_resolve_xpath_textless_anchor_returns_following_text_context():
+    html_content = (
+        "<html><body>"
+        "<p>Prior section.</p>"
+        "<a id='chapter-start'></a>"
+        "<div><p>Chapter starts here.</p></div>"
+        "</body></html>"
+    )
+    parser = _parser_for_single_spine(html_content, start=40)
+
+    context = parser.resolve_xpath("book.epub", "/body/DocFragment[1]/body/a")
+
+    assert context == "Chapter starts here."
+
+
+def test_textless_anchor_does_not_cross_spine_boundary():
+    parser = _parser_for_spines(
+        [
+            (1, "<html><body><p>End of chapter.</p><a id='chapter-end'></a></body></html>"),
+            (2, "<html><body><p>Next chapter starts here.</p></body></html>"),
+        ]
+    )
+    xpath = "/body/DocFragment[1]/body/a"
+
+    assert parser.resolve_xpath_to_index("book.epub", xpath) is None
+    assert parser.resolve_xpath("book.epub", xpath) is None
+
+
 def test_resolve_xpath_to_index_prefix_unique_fallback(caplog):
     caplog.set_level(logging.DEBUG)
     long_head = "".join(f"{i:03d}" for i in range(50))

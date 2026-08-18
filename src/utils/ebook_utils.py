@@ -1769,6 +1769,42 @@ class EbookParser:
         logger.warning(f"Could not resolve XPath in {filename}: {clean_xpath}")
         return None, None, None
 
+    @staticmethod
+    def _lxml_target_local_offset(tree, target_node, target_offset=0) -> Optional[int]:
+        """Return the target's character boundary in normalized spine text."""
+        preceding_len = 0
+        separator_len = 1
+
+        for node in tree.iter():
+            if node == target_node:
+                if node.text and target_offset > 0:
+                    raw_segment = node.text[: min(len(node.text), target_offset)]
+                    preceding_len += len(raw_segment.strip())
+                elif target_offset > 0:
+                    preceding_len += target_offset
+                return preceding_len
+
+            if node.text and node.text.strip():
+                preceding_len += len(node.text.strip()) + separator_len
+            if node.tail and node.tail.strip():
+                preceding_len += len(node.tail.strip()) + separator_len
+
+        return None
+
+    def _textless_xpath_target_local_offset(self, tree, target_node) -> Optional[int]:
+        """Resolve an empty element only when text follows in the same spine item."""
+        try:
+            following_text = target_node.xpath("following::text()[normalize-space()]")
+        except Exception as e:
+            logger.debug(f"Could not inspect text following empty XPath target: {e}")
+            return None
+
+        if not following_text:
+            logger.debug("Textless XPath target has no following text in its spine item")
+            return None
+
+        return self._lxml_target_local_offset(tree, target_node)
+
     def resolve_xpath(self, filename, xpath_str):
         """
         RESOLVER:
@@ -1824,7 +1860,22 @@ class EbookParser:
             node_text = target_node.text_content().strip()
             clean_anchor = " ".join(node_text.split())
             if not clean_anchor:
-                return None
+                local_pos = self._textless_xpath_target_local_offset(tree, target_node)
+                if local_pos is None:
+                    return None
+
+                chapter_end = min(len(full_text), target_item['end'])
+                global_offset = min(chapter_end, target_item['start'] + local_pos)
+                if global_offset >= chapter_end:
+                    return None
+
+                logger.info(
+                    "Resolved textless XPath target to following-text boundary "
+                    "in spine %s for '%s'",
+                    target_item['spine_index'],
+                    Path(filename).name,
+                )
+                return full_text[global_offset:min(chapter_end, global_offset + 600)]
 
             # 2. Find this anchor in the BS4 content (spine_map item)
             # We search specifically in this chapter's content to minimize false positives
@@ -1847,33 +1898,13 @@ class EbookParser:
                 # Fallback: If exact match fails (rare), try the old calculation method
                 # (This preserves old behavior if the new matching fails)
                 logger.debug("Exact text match failed, falling back to LXML offset calculation")
-                # Falling back to strict calculation (Logic from original implementation)
-                
-                preceding_len = 0
-                found_target = False
-                SEPARATOR_LEN = 1
 
-                for node in tree.iter():
-                    if node == target_node:
-                        found_target = True
-                        if node.text and target_offset > 0:
-                            raw_segment = node.text[:min(len(node.text), target_offset)]
-                            preceding_len += len(raw_segment.strip())
-                        elif target_offset > 0:
-                            preceding_len += target_offset
-                        break
-
-                    if node.text and node.text.strip():
-                        preceding_len += (len(node.text.strip()) + SEPARATOR_LEN)
-                    if node.tail and node.tail.strip():
-                        preceding_len += (len(node.tail.strip()) + SEPARATOR_LEN)
-                
-                if found_target:
-                     local_pos = preceding_len
-                     global_offset = target_item['start'] + local_pos
-                     start = max(0, global_offset)
-                     end = min(len(full_text), global_offset + 500)
-                     return full_text[start:end]
+                local_pos = self._lxml_target_local_offset(tree, target_node, target_offset)
+                if local_pos is not None:
+                    global_offset = target_item['start'] + local_pos
+                    start = max(0, global_offset)
+                    end = min(len(full_text), global_offset + 500)
+                    return full_text[start:end]
 
                 return None
 
@@ -1957,13 +1988,26 @@ class EbookParser:
 
             target_node = elements[0]
 
-            node_text = target_node.text_content().strip()
-            clean_anchor = " ".join(node_text.split())
-            if not clean_anchor:
-                return None
             chapter_len = max(0, target_item['end'] - target_item['start'])
             chapter_base = target_item['start']
             full_len = len(full_text)
+            node_text = target_node.text_content().strip()
+            clean_anchor = " ".join(node_text.split())
+            if not clean_anchor:
+                local_offset = self._textless_xpath_target_local_offset(tree, target_node)
+                if local_offset is None:
+                    return None
+
+                if chapter_len > 0:
+                    local_offset = min(local_offset, chapter_len)
+                global_offset = min(full_len, chapter_base + local_offset)
+                logger.info(
+                    "Resolved textless XPath target to following-text boundary "
+                    "in spine %s for '%s'",
+                    target_item['spine_index'],
+                    Path(filename).name,
+                )
+                return global_offset
 
             # Tier: exact unique match in BS4 coordinate space.
             if clean_anchor:
@@ -2061,25 +2105,8 @@ class EbookParser:
             # Tier: LXML-based position fallback (last resort when text-matching fails).
             # Mirrors the fallback in resolve_xpath(). Less precise than text-anchoring
             # but still produces an "xpath"-sourced offset, which is high-confidence.
-            preceding_len = 0
-            found_target = False
-            SEPARATOR_LEN = 1
-            for node in tree.iter():
-                if node == target_node:
-                    found_target = True
-                    if node.text and target_offset > 0:
-                        raw_segment = node.text[: min(len(node.text), target_offset)]
-                        preceding_len += len(raw_segment.strip())
-                    elif target_offset > 0:
-                        preceding_len += target_offset
-                    break
-                if node.text and node.text.strip():
-                    preceding_len += len(node.text.strip()) + SEPARATOR_LEN
-                if node.tail and node.tail.strip():
-                    preceding_len += len(node.tail.strip()) + SEPARATOR_LEN
-
-            if found_target:
-                local_offset = preceding_len
+            local_offset = self._lxml_target_local_offset(tree, target_node, target_offset)
+            if local_offset is not None:
                 if chapter_len > 0:
                     local_offset = min(local_offset, chapter_len)
                 global_offset = min(full_len, chapter_base + local_offset)

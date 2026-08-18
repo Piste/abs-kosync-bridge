@@ -93,6 +93,8 @@ def test_normalization_prefers_xpath_offset():
     normalized = manager._normalize_for_cross_format_comparison(book, config)
 
     assert normalized["KoSync"] == 555.0
+    assert config["KoSync"].current["_normalization_source"] == "xpath"
+    assert config["KoSync"].current["_normalization_confidence"] == "high"
     _, kwargs = manager.alignment_service.get_time_for_text.call_args
     assert kwargs["char_offset_hint"] == 123
     manager.ebook_parser.resolve_xpath_to_index.assert_called_once()
